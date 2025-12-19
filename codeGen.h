@@ -1,11 +1,12 @@
 #ifndef CODEGEN_H
 #define CODEGEN_H
 
-#include <string>
 #include "node.h"
+#include <string>
 
-// Generate target assembly from parse tree.
-// outAsmFile should be "a.asm" (stdin) or "<file>.asm" (file input).
-void generateTarget(Node* root, const std::string& outAsmFile);
+// Entry point for P4 code generation
+// root = parse tree from P2
+// outName = name of .asm file to generate
+void generateCode(Node* root, const std::string& outName);
 
 #endif

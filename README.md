@@ -1,24 +1,20 @@
-CS4280 P4 - Target Generation and Storage Allocation
-Name: Curtis Been
-SSO: cjb2m8
+Curtis Been
+CS4280 - Project P4 (Target Generation and Storage Allocation)
 
 Build:
   make
 
-Run (file input, implicit extension supported):
-  ./compile test
-  (tries "test" then "test.fs25s2")
-
-Run (explicit extension also works):
-  ./compile test.fs25s2
-
-Keyboard input (produces a.asm):
-  ./compile
-
-Output:
-  - If keyboard input: a.asm
-  - If file input: <file>.asm (file base name)
+Invocation:
+  ./compile            (reads program from keyboard/stdin, outputs a.asm)
+  ./compile <filebase> (reads <filebase>.fs25s2, outputs <filebase>.asm)
 
 Notes:
-  - This project integrates P1 (scanner), P2 (parser), P3 (static semantics), and P4 (code generation).
-  - P3 errors/warnings are handled before code generation.
+- Project includes P1 scanner, P2 parser (parse tree), P3 static semantics, and P4 code generation.
+- When input is correct, P4 should not print extra debug output.
+- Static semantics behavior:
+    ERROR in P3: ...  (printed to stdout, then exit)
+    WARNING in P3: ... (printed to stdout, continue)
+
+Output:
+- a.asm when compiling from stdin
+- <filebase>.asm when compiling from a file argument

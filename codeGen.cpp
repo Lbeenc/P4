@@ -1,19 +1,22 @@
 #include "codeGen.h"
 #include <unordered_set>
-#include <unordered_map>
-#include <string>
 #include <vector>
+#include <string>
 #include <stdexcept>
-#include <sstream>
 
 static int tempCount = 0;
 static int labelCount = 0;
 
-static std::vector<std::string> temps;
 static std::unordered_set<std::string> vars;
-static std::vector<std::string> code;   // <-- BUFFERED CODE
+static std::vector<std::string> temps;
+static std::vector<std::string> code;
 
-// helpers
+/* ---------- helpers ---------- */
+
+static void emit(const std::string& s) {
+    code.push_back(s);
+}
+
 static std::string newTemp() {
     std::string t = "_t" + std::to_string(tempCount++);
     temps.push_back(t);
@@ -24,19 +27,22 @@ static std::string newLabel(const std::string& base) {
     return base + std::to_string(labelCount++);
 }
 
-static bool isIdTok(const Token& t) { return t.id == TokenID::IDENT_tk; }
-static bool isNumTok(const Token& t) { return t.id == TokenID::NUM_tk; }
-
-static void emit(const std::string& s) {
-    code.push_back(s);
+static bool isId(const Token& t) {
+    return t.id == TokenID::IDENT_tk;
 }
+
+static bool isNum(const Token& t) {
+    return t.id == TokenID::NUM_tk;
+}
+
+/* ---------- variable collection ---------- */
 
 static void collectVars(Node* n) {
     if (!n) return;
 
-    if (isIdTok(n->tk1)) vars.insert(n->tk1.instance);
-    if (isIdTok(n->tk2)) vars.insert(n->tk2.instance);
-    if (isIdTok(n->tk3)) vars.insert(n->tk3.instance);
+    if (isId(n->tk1)) vars.insert(n->tk1.instance);
+    if (isId(n->tk2)) vars.insert(n->tk2.instance);
+    if (isId(n->tk3)) vars.insert(n->tk3.instance);
 
     collectVars(n->child1);
     collectVars(n->child2);
@@ -44,16 +50,16 @@ static void collectVars(Node* n) {
     collectVars(n->child4);
 }
 
-// ====================== EXPRESSIONS ======================
+/* ---------- expressions ---------- */
 
 static std::string genExpr(Node* n);
 
 static std::string genR(Node* n) {
     if (!n) return "";
 
-    if (isIdTok(n->tk1)) return n->tk1.instance;
+    if (isId(n->tk1)) return n->tk1.instance;
 
-    if (isNumTok(n->tk1)) {
+    if (isNum(n->tk1)) {
         std::string t = newTemp();
         emit("LOAD " + n->tk1.instance);
         emit("STORE " + t);
@@ -67,33 +73,41 @@ static std::string genR(Node* n) {
 static std::string genN(Node* n) {
     if (!n) return "";
 
-    if (n->tk1.id == TokenID::OP_tk && n->tk1.instance == "-") {
-        std::string rhs = genN(n->child1);
+    if (n->tk1.instance == "-") {
+        std::string v = genN(n->child1);
         std::string t = newTemp();
         emit("LOAD 0");
-        emit("SUB " + rhs);
+        emit("SUB " + v);
         emit("STORE " + t);
         return t;
     }
 
-    if (n->child1) return genExpr(n->child1);
     return genR(n);
 }
 
 static std::string genM(Node* n) {
     if (!n) return "";
 
-    if (n->tk1.id == TokenID::OP_tk && n->tk1.instance == "*") {
-        std::string left = genExpr(n->child1);
-        std::string right = genM(n->child2);
+    if (n->tk1.instance == "*") {
+        std::string l = genExpr(n->child1);
+        std::string r = genM(n->child2);
         std::string t = newTemp();
-        emit("LOAD " + left);
-        emit("MULT " + right);
+        emit("LOAD " + l);
+        emit("MULT " + r);
         emit("STORE " + t);
         return t;
     }
 
-    if (n->child1) return genExpr(n->child1);
+    if (n->tk1.instance == "%") {
+        std::string l = genExpr(n->child1);
+        std::string r = genM(n->child2);
+        std::string t = newTemp();
+        emit("LOAD " + l);
+        emit("MOD " + r);
+        emit("STORE " + t);
+        return t;
+    }
+
     return genN(n);
 }
 
@@ -104,66 +118,72 @@ static std::string genExpr(Node* n) {
     if (n->label == NodeType::N) return genN(n);
     if (n->label == NodeType::M) return genM(n);
 
-    if (n->tk1.id == TokenID::OP_tk &&
-        (n->tk1.instance == "+" || n->tk1.instance == "-")) {
-
-        std::string left = genM(n->child1);
-        std::string right = genExpr(n->child2);
+    if (n->tk1.instance == "+" || n->tk1.instance == "-") {
+        std::string l = genExpr(n->child1);
+        std::string r = genExpr(n->child2);
         std::string t = newTemp();
-
-        emit("LOAD " + left);
-        if (n->tk1.instance == "+") emit("ADD " + right);
-        else emit("SUB " + right);
+        emit("LOAD " + l);
+        emit((n->tk1.instance == "+") ? "ADD " + r : "SUB " + r);
         emit("STORE " + t);
         return t;
     }
 
-    if (n->child1) return genExpr(n->child1);
-    return "";
+    return genExpr(n->child1);
 }
 
-// ====================== RELATIONAL ======================
+/* ---------- conditionals ---------- */
 
-static void genRelJumpFalse(Node* relNode, const std::string& falseLabel) {
-    std::string op = relNode->tk1.instance;
-    std::string left = genExpr(relNode->child1);
-    std::string right = genExpr(relNode->child2);
+static void genRelFalse(Node* n, const std::string& lab) {
+    std::string l = genExpr(n->child1);
+    std::string r = genExpr(n->child2);
 
-    emit("LOAD " + left);
-    emit("SUB " + right);
+    emit("LOAD " + l);
+    emit("SUB " + r);
 
-    if (op == "eq") {
-        emit("BRNEG " + falseLabel);
-        emit("BRPOS " + falseLabel);
+    std::string op = n->tk1.instance;
+
+    if (op == ">") {
+        emit("BRNEG " + lab);
+        emit("BRZERO " + lab);
+    } else if (op == "<") {
+        emit("BRPOS " + lab);
+        emit("BRZERO " + lab);
+    } else if (op == ">=") {
+        emit("BRNEG " + lab);
+    } else if (op == "<=") {
+        emit("BRPOS " + lab);
+    } else if (op == "eq") {
+        emit("BRNEG " + lab);
+        emit("BRPOS " + lab);
     } else if (op == "neq") {
-        std::string ok = newLabel("L");
+        std::string ok = newLabel("OK");
         emit("BRNEG " + ok);
         emit("BRPOS " + ok);
-        emit("BR " + falseLabel);
+        emit("BR " + lab);
         emit(ok + ": NOOP");
-    } else if (op == "<") {
-        emit("BRPOS " + falseLabel);
-        emit("BRZERO " + falseLabel);
-    } else if (op == ">") {
-        emit("BRNEG " + falseLabel);
-        emit("BRZERO " + falseLabel);
-    } else if (op == "<=") {
-        emit("BRPOS " + falseLabel);
-    } else if (op == ">=") {
-        emit("BRNEG " + falseLabel);
-    } else {
-        throw std::runtime_error("Unknown relational operator");
     }
 }
 
-// ====================== STATEMENTS ======================
+/* ---------- statements ---------- */
 
 static void genStat(Node* n);
 
 static void genStats(Node* n) {
     if (!n) return;
-    if (n->child1) genStat(n->child1);
-    if (n->child2) genStats(n->child2);
+    genStat(n->child1);
+    genStats(n->child2);
+}
+
+static std::string getAssignTarget(Node* n) {
+    if (isId(n->tk2)) return n->tk2.instance;
+    if (n->child1 && isId(n->child1->tk1)) return n->child1->tk1.instance;
+    throw std::runtime_error("ASSIGN missing target");
+}
+
+static std::string getReadTarget(Node* n) {
+    if (isId(n->tk2)) return n->tk2.instance;
+    if (n->child1 && isId(n->child1->tk1)) return n->child1->tk1.instance;
+    throw std::runtime_error("READ missing identifier");
 }
 
 static void genStat(Node* n) {
@@ -171,53 +191,50 @@ static void genStat(Node* n) {
 
     switch (n->label) {
         case NodeType::READ: {
-            emit("READ " + n->tk1.instance);
+            emit("READ " + getReadTarget(n));
             break;
         }
         case NodeType::PRINT: {
-            std::string v = genExpr(n->child1);
-            emit("WRITE " + v);
+            emit("WRITE " + genExpr(n->child1));
             break;
         }
         case NodeType::ASSIGN: {
-            std::string id = n->tk1.instance;
-            std::string v = genExpr(n->child1);
+            std::string id = getAssignTarget(n);
+            std::string v = genExpr(n->child2 ? n->child2 : n->child1);
             emit("LOAD " + v);
             emit("STORE " + id);
             break;
         }
-        case NodeType::BLOCK: {
-            if (n->child2) genStats(n->child2);
-            break;
-        }
         case NodeType::COND: {
-            std::string endLabel = newLabel("ENDIF");
-            genRelJumpFalse(n->child2, endLabel);
-            if (n->child4) genStat(n->child4);
-            emit(endLabel + ": NOOP");
+            std::string end = newLabel("ENDIF");
+            genRelFalse(n->child2, end);
+            genStat(n->child4);
+            emit(end + ": NOOP");
             break;
         }
         case NodeType::LOOP: {
             std::string top = newLabel("WHILE");
             std::string end = newLabel("ENDWHILE");
             emit(top + ": NOOP");
-            genRelJumpFalse(n->child2, end);
-            if (n->child4) genStat(n->child4);
+            genRelFalse(n->child2, end);
+            genStat(n->child4);
             emit("BR " + top);
             emit(end + ": NOOP");
             break;
         }
-        default: {
-            if (n->child1) genStat(n->child1);
-        }
+        case NodeType::BLOCK:
+            genStats(n->child2);
+            break;
+        default:
+            genStat(n->child1);
     }
 }
 
-// ====================== ENTRY POINT ======================
+/* ---------- entry ---------- */
 
 void generateTarget(Node* root, std::ostream& out) {
-    temps.clear();
     vars.clear();
+    temps.clear();
     code.clear();
     tempCount = 0;
     labelCount = 0;
@@ -227,15 +244,9 @@ void generateTarget(Node* root, std::ostream& out) {
     if (root && root->child2)
         genStat(root->child2);
 
-    // -------- STORAGE FIRST --------
-    for (const auto& v : vars)
-        out << v << " 0\n";
-    for (const auto& t : temps)
-        out << t << " 0\n";
-
-    // -------- EXECUTABLE CODE --------
-    for (const auto& c : code)
-        out << c << "\n";
+    for (const auto& v : vars) out << v << " 0\n";
+    for (const auto& t : temps) out << t << " 0\n";
+    for (const auto& c : code) out << c << "\n";
 
     out << "STOP\n";
 }

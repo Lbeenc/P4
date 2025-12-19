@@ -1,10 +1,10 @@
 #ifndef CODEGEN_H
 #define CODEGEN_H
 
-#include <string>
+#include <ostream>
 #include "node.h"
 
-// Generate assembly target into outFile (e.g., a.asm or file.asm)
-void generateTarget(Node* root, const std::string& outFile);
+// Generate target assembly into the provided output stream.
+void generateTarget(Node* root, std::ostream& out);
 
 #endif

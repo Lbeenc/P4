@@ -4,12 +4,14 @@
 #include <string>
 #include <vector>
 #include <stdexcept>
+#include <sstream>
 
 static int tempCount = 0;
 static int labelCount = 0;
 
 static std::vector<std::string> temps;
 static std::unordered_set<std::string> vars;
+static std::vector<std::string> code;   // <-- BUFFERED CODE
 
 // helpers
 static std::string newTemp() {
@@ -25,11 +27,13 @@ static std::string newLabel(const std::string& base) {
 static bool isIdTok(const Token& t) { return t.id == TokenID::IDENT_tk; }
 static bool isNumTok(const Token& t) { return t.id == TokenID::NUM_tk; }
 
+static void emit(const std::string& s) {
+    code.push_back(s);
+}
+
 static void collectVars(Node* n) {
     if (!n) return;
 
-    // Any ID token that appears under <vars>/<varList> should already exist in those nodes.
-    // But to be safe, collect every IDENT token we see.
     if (isIdTok(n->tk1)) vars.insert(n->tk1.instance);
     if (isIdTok(n->tk2)) vars.insert(n->tk2.instance);
     if (isIdTok(n->tk3)) vars.insert(n->tk3.instance);
@@ -40,245 +44,198 @@ static void collectVars(Node* n) {
     collectVars(n->child4);
 }
 
-/*
-  Expression codegen strategy (stack-ish using temps):
-  - genExpr returns the name of a temp or a variable holding the expression value.
-  - For NUM: loads constant into temp via LOAD <num>, STORE <temp>
-  - For ID: just returns ID name (or loads into temp if you want; this works if VM supports LOAD var)
-*/
-static std::string genExpr(Node* n, std::ostream& out);
+// ====================== EXPRESSIONS ======================
 
-// NodeType mapping depends on your parser building:
-// EXP handles +/-, M handles *, N handles % and unary -, R handles () / id / int.
-static std::string genR(Node* n, std::ostream& out) {
+static std::string genExpr(Node* n);
+
+static std::string genR(Node* n) {
     if (!n) return "";
 
-    // If your parser stores a single token for R in tk1:
     if (isIdTok(n->tk1)) return n->tk1.instance;
 
     if (isNumTok(n->tk1)) {
         std::string t = newTemp();
-        out << "LOAD " << n->tk1.instance << "\n";
-        out << "STORE " << t << "\n";
+        emit("LOAD " + n->tk1.instance);
+        emit("STORE " + t);
         return t;
     }
 
-    // Parenthesized: usually child1 is <exp>
-    if (n->child1) return genExpr(n->child1, out);
-
+    if (n->child1) return genExpr(n->child1);
     return "";
 }
 
-static std::string genN(Node* n, std::ostream& out) {
+static std::string genN(Node* n) {
     if (!n) return "";
 
-    // unary '-' is often stored as tk1 instance == "-" OR child pattern
     if (n->tk1.id == TokenID::OP_tk && n->tk1.instance == "-") {
-        // assume child1 holds the <N> or <R>
-        std::string rhs = n->child1 ? genN(n->child1, out) : genR(n->child1, out);
+        std::string rhs = genN(n->child1);
         std::string t = newTemp();
-        out << "LOAD 0\n";
-        out << "SUB " << rhs << "\n";
-        out << "STORE " << t << "\n";
+        emit("LOAD 0");
+        emit("SUB " + rhs);
+        emit("STORE " + t);
         return t;
     }
 
-    // % chain: child1 <R>, tk1 "%"?, child2 <N> etc — depends on your tree.
-    // Common build: N -> R % N OR R
-    if (n->tk1.id == TokenID::OP_tk && n->tk1.instance == "%") {
-        // if you built as: child1=R, child2=N
-        std::string left = genR(n->child1, out);
-        std::string right = genN(n->child2, out);
-        std::string t = newTemp();
-        out << "LOAD " << left << "\n";
-        out << "MOD " << right << "\n";
-        out << "STORE " << t << "\n";
-        return t;
-    }
-
-    // fallback: if has child1 it’s usually R
-    if (n->child1 && n->label == NodeType::N) {
-        // could be R or nested
-        return genExpr(n->child1, out);
-    }
-
-    return genR(n, out);
+    if (n->child1) return genExpr(n->child1);
+    return genR(n);
 }
 
-static std::string genM(Node* n, std::ostream& out) {
+static std::string genM(Node* n) {
     if (!n) return "";
 
-    // M -> N * M | N
     if (n->tk1.id == TokenID::OP_tk && n->tk1.instance == "*") {
-        // child1=N, child2=M
-        std::string left = genExpr(n->child1, out);
-        std::string right = genM(n->child2, out);
+        std::string left = genExpr(n->child1);
+        std::string right = genM(n->child2);
         std::string t = newTemp();
-        out << "LOAD " << left << "\n";
-        out << "MULT " << right << "\n";
-        out << "STORE " << t << "\n";
+        emit("LOAD " + left);
+        emit("MULT " + right);
+        emit("STORE " + t);
         return t;
     }
 
-    // otherwise just N
-    if (n->child1) return genExpr(n->child1, out);
-    return genN(n, out);
+    if (n->child1) return genExpr(n->child1);
+    return genN(n);
 }
 
-static std::string genExpr(Node* n, std::ostream& out) {
+static std::string genExpr(Node* n) {
     if (!n) return "";
 
-    // If this node is literally R/N/M, dispatch
-    if (n->label == NodeType::R) return genR(n, out);
-    if (n->label == NodeType::N) return genN(n, out);
-    if (n->label == NodeType::M) return genM(n, out);
+    if (n->label == NodeType::R) return genR(n);
+    if (n->label == NodeType::N) return genN(n);
+    if (n->label == NodeType::M) return genM(n);
 
-    // EXP -> M + EXP | M - EXP | M
-    if (n->tk1.id == TokenID::OP_tk && (n->tk1.instance == "+" || n->tk1.instance == "-")) {
-        std::string left = genM(n->child1, out);
-        std::string right = genExpr(n->child2, out);
+    if (n->tk1.id == TokenID::OP_tk &&
+        (n->tk1.instance == "+" || n->tk1.instance == "-")) {
+
+        std::string left = genM(n->child1);
+        std::string right = genExpr(n->child2);
         std::string t = newTemp();
-        out << "LOAD " << left << "\n";
-        if (n->tk1.instance == "+") out << "ADD " << right << "\n";
-        else out << "SUB " << right << "\n";
-        out << "STORE " << t << "\n";
+
+        emit("LOAD " + left);
+        if (n->tk1.instance == "+") emit("ADD " + right);
+        else emit("SUB " + right);
+        emit("STORE " + t);
         return t;
     }
 
-    // otherwise child1 likely M
-    if (n->child1) return genExpr(n->child1, out);
-
+    if (n->child1) return genExpr(n->child1);
     return "";
 }
 
-// relational: >, <, >=, <=, eq, neq
-static void genRelJumpFalse(Node* relNode, const std::string& falseLabel, std::ostream& out) {
-    // Expect: relNode stores operator in tk1.instance and children hold LHS/RHS expressions
-    std::string op = relNode->tk1.instance;
-    std::string left = genExpr(relNode->child1, out);
-    std::string right = genExpr(relNode->child2, out);
+// ====================== RELATIONAL ======================
 
-    // Convention:
-    // LOAD left; SUB right; then branch based on result.
-    out << "LOAD " << left << "\n";
-    out << "SUB " << right << "\n";
+static void genRelJumpFalse(Node* relNode, const std::string& falseLabel) {
+    std::string op = relNode->tk1.instance;
+    std::string left = genExpr(relNode->child1);
+    std::string right = genExpr(relNode->child2);
+
+    emit("LOAD " + left);
+    emit("SUB " + right);
 
     if (op == "eq") {
-        out << "BRNEG " << falseLabel << "\n";
-        out << "BRPOS " << falseLabel << "\n";
+        emit("BRNEG " + falseLabel);
+        emit("BRPOS " + falseLabel);
     } else if (op == "neq") {
-        // if result == 0 => false
         std::string ok = newLabel("L");
-        out << "BRNEG " << ok << "\n";
-        out << "BRPOS " << ok << "\n";
-        out << "BR " << falseLabel << "\n";
-        out << ok << ": NOOP\n";
+        emit("BRNEG " + ok);
+        emit("BRPOS " + ok);
+        emit("BR " + falseLabel);
+        emit(ok + ": NOOP");
     } else if (op == "<") {
-        // left-right < 0 is true; false if >=0
-        out << "BRPOS " << falseLabel << "\n";
-        out << "BRZPOS " << falseLabel << "\n"; // if your VM has BRZPOS; if not, ignore/remove
+        emit("BRPOS " + falseLabel);
+        emit("BRZERO " + falseLabel);
     } else if (op == ">") {
-        // true if >0; false if <=0
-        out << "BRNEG " << falseLabel << "\n";
-        out << "BRZERO " << falseLabel << "\n";
+        emit("BRNEG " + falseLabel);
+        emit("BRZERO " + falseLabel);
     } else if (op == "<=") {
-        // false if >0
-        out << "BRPOS " << falseLabel << "\n";
+        emit("BRPOS " + falseLabel);
     } else if (op == ">=") {
-        // false if <0
-        out << "BRNEG " << falseLabel << "\n";
+        emit("BRNEG " + falseLabel);
     } else {
-        // If your VM uses different branches, adjust here.
-        throw std::runtime_error("Unknown relational operator: " + op);
+        throw std::runtime_error("Unknown relational operator");
     }
 }
 
-static void genStat(Node* n, std::ostream& out);
+// ====================== STATEMENTS ======================
 
-static void genStats(Node* n, std::ostream& out) {
+static void genStat(Node* n);
+
+static void genStats(Node* n) {
     if (!n) return;
-    // stats -> stat mStat
-    if (n->child1) genStat(n->child1, out);
-    if (n->child2) genStats(n->child2, out);
+    if (n->child1) genStat(n->child1);
+    if (n->child2) genStats(n->child2);
 }
 
-static void genStat(Node* n, std::ostream& out) {
+static void genStat(Node* n) {
     if (!n) return;
 
     switch (n->label) {
         case NodeType::READ: {
-            // read identifier :
-            std::string id = n->tk1.instance; // usually ID stored in tk1
-            out << "READ " << id << "\n";
+            emit("READ " + n->tk1.instance);
             break;
         }
         case NodeType::PRINT: {
-            // print <exp> :
-            std::string v = genExpr(n->child1, out);
-            out << "WRITE " << v << "\n";
+            std::string v = genExpr(n->child1);
+            emit("WRITE " + v);
             break;
         }
         case NodeType::ASSIGN: {
-            // set identifier ~ <exp> :
             std::string id = n->tk1.instance;
-            std::string v = genExpr(n->child1, out);
-            out << "LOAD " << v << "\n";
-            out << "STORE " << id << "\n";
+            std::string v = genExpr(n->child1);
+            emit("LOAD " + v);
+            emit("STORE " + id);
             break;
         }
         case NodeType::BLOCK: {
-            // { <vars> <stats> }
-            if (n->child2) genStats(n->child2, out);
+            if (n->child2) genStats(n->child2);
             break;
         }
         case NodeType::COND: {
-            // if [ identifier <rel> <exp> ] <stat>
             std::string endLabel = newLabel("ENDIF");
-            // your tree likely stores relational node as child2 and exp as child3
-            Node* rel = n->child2;
-            genRelJumpFalse(rel, endLabel, out);
-            if (n->child4) genStat(n->child4, out);
-            out << endLabel << ": NOOP\n";
+            genRelJumpFalse(n->child2, endLabel);
+            if (n->child4) genStat(n->child4);
+            emit(endLabel + ": NOOP");
             break;
         }
         case NodeType::LOOP: {
-            // while [ identifier <rel> <exp> ] <stat>
-            std::string topLabel = newLabel("WHILE");
-            std::string endLabel = newLabel("ENDWHILE");
-            out << topLabel << ": NOOP\n";
-            Node* rel = n->child2;
-            genRelJumpFalse(rel, endLabel, out);
-            if (n->child4) genStat(n->child4, out);
-            out << "BR " << topLabel << "\n";
-            out << endLabel << ": NOOP\n";
+            std::string top = newLabel("WHILE");
+            std::string end = newLabel("ENDWHILE");
+            emit(top + ": NOOP");
+            genRelJumpFalse(n->child2, end);
+            if (n->child4) genStat(n->child4);
+            emit("BR " + top);
+            emit(end + ": NOOP");
             break;
         }
         default: {
-            // wrappers: STAT nodes may wrap child1
-            if (n->child1) genStat(n->child1, out);
-            break;
+            if (n->child1) genStat(n->child1);
         }
     }
 }
 
+// ====================== ENTRY POINT ======================
+
 void generateTarget(Node* root, std::ostream& out) {
     temps.clear();
     vars.clear();
+    code.clear();
     tempCount = 0;
     labelCount = 0;
 
-    // gather vars so we can emit storage at the end
     collectVars(root);
 
-    // program -> start vars block trats
-    // typically root PROGRAM: child1=vars, child2=block
-    if (root && root->child2) {
-        genStat(root->child2, out);
-    }
+    if (root && root->child2)
+        genStat(root->child2);
+
+    // -------- STORAGE FIRST --------
+    for (const auto& v : vars)
+        out << v << " 0\n";
+    for (const auto& t : temps)
+        out << t << " 0\n";
+
+    // -------- EXECUTABLE CODE --------
+    for (const auto& c : code)
+        out << c << "\n";
 
     out << "STOP\n";
-
-    // storage (user vars + temps)
-    for (const auto& v : vars) out << v << " 0\n";
-    for (const auto& t : temps) out << t << " 0\n";
 }

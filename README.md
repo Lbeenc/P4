@@ -1,19 +1,24 @@
+CS4280 P4 - Target Generation and Storage Allocation
 Name: Curtis Been
-Course: CS 4280
-Project: P4 – Target Generation
+SSO: cjb2m8
 
-This project completes the compiler by generating target assembly code
-from the parse tree after successful static semantic analysis.
+Build:
+  make
 
-Invocation:
-  compile [file]
+Run (file input, implicit extension supported):
+  ./compile test
+  (tries "test" then "test.fs25s2")
+
+Run (explicit extension also works):
+  ./compile test.fs25s2
+
+Keyboard input (produces a.asm):
+  ./compile
 
 Output:
-  a.asm       (keyboard input)
-  file.asm    (file input)
+  - If keyboard input: a.asm
+  - If file input: <file>.asm (file base name)
 
 Notes:
-- Global storage allocation is used
-- Temporary variables begin with 't'
-- All prior P1–P3 outputs are disabled
-- Code generation is performed via parse tree traversal
+  - This project integrates P1 (scanner), P2 (parser), P3 (static semantics), and P4 (code generation).
+  - P3 errors/warnings are handled before code generation.

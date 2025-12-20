@@ -133,34 +133,70 @@ static std::string genExpr(Node* n) {
 
 /* ---------- conditionals ---------- */
 
-static void genRelFalse(Node* n, const std::string& lab) {
-    std::string l = genExpr(n->child1);
-    std::string r = genExpr(n->child2);
+static std::string ensureValue(const Token& t) {
+    // Convert an IDENT/NUM token into something we can use as an operand.
+    // If NUM, load into a temp so downstream ops always have a named operand.
+    if (isId(t)) return t.instance;
 
+    if (isNum(t)) {
+        std::string tmp = newTemp();
+        emit("LOAD " + t.instance);
+        emit("STORE " + tmp);
+        return tmp;
+    }
+
+    return "";
+}
+
+static void genRelFalse(Node* n, const std::string& lab) {
+    if (!n) throw std::runtime_error("REL node is null");
+
+    // Operator is usually in tk1
+    std::string op = n->tk1.instance;
+
+    // Left and right operands can be in children OR in tokens (tk2/tk3) depending on your parser.
+    std::string l, r;
+
+    // Prefer children if present (covers complex expressions like p4_9)
+    if (n->child1) l = genExpr(n->child1);
+    if (n->child2) r = genExpr(n->child2);
+
+    // Fallback: use tokens if children missing (covers simple: id_1 > 0)
+    if (l.empty()) l = ensureValue(n->tk2);
+    if (r.empty()) r = ensureValue(n->tk3);
+
+    if (l.empty() || r.empty()) {
+        throw std::runtime_error("REL missing operand(s)");
+    }
+
+    // Evaluate: ACC = left - right
     emit("LOAD " + l);
     emit("SUB " + r);
 
-    std::string op = n->tk1.instance;
-
+    // Branch to lab when condition is FALSE
     if (op == ">") {
+        // false if <= 0
         emit("BRNEG " + lab);
         emit("BRZERO " + lab);
     } else if (op == "<") {
+        // false if >= 0
         emit("BRPOS " + lab);
         emit("BRZERO " + lab);
     } else if (op == ">=") {
+        // false if < 0
         emit("BRNEG " + lab);
     } else if (op == "<=") {
+        // false if > 0
         emit("BRPOS " + lab);
     } else if (op == "eq") {
+        // false if != 0
         emit("BRNEG " + lab);
         emit("BRPOS " + lab);
     } else if (op == "neq") {
-        std::string ok = newLabel("OK");
-        emit("BRNEG " + ok);
-        emit("BRPOS " + ok);
-        emit("BR " + lab);
-        emit(ok + " NOOP");   // ✅ FIXED
+        // false if == 0
+        emit("BRZERO " + lab);
+    } else {
+        throw std::runtime_error("Unknown relational operator: " + op);
     }
 }
 

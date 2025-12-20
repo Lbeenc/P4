@@ -160,7 +160,7 @@ static void genRelFalse(Node* n, const std::string& lab) {
         emit("BRNEG " + ok);
         emit("BRPOS " + ok);
         emit("BR " + lab);
-        emit(ok + ": NOOP");
+        emit(ok + " NOOP");   // ✅ FIXED
     }
 }
 
@@ -190,14 +190,14 @@ static void genStat(Node* n) {
     if (!n) return;
 
     switch (n->label) {
-        case NodeType::READ: {
+        case NodeType::READ:
             emit("READ " + getReadTarget(n));
             break;
-        }
-        case NodeType::PRINT: {
+
+        case NodeType::PRINT:
             emit("WRITE " + genExpr(n->child1));
             break;
-        }
+
         case NodeType::ASSIGN: {
             std::string id = getAssignTarget(n);
             std::string v = genExpr(n->child2 ? n->child2 : n->child1);
@@ -205,26 +205,30 @@ static void genStat(Node* n) {
             emit("STORE " + id);
             break;
         }
+
         case NodeType::COND: {
             std::string end = newLabel("ENDIF");
             genRelFalse(n->child2, end);
             genStat(n->child4);
-            emit(end + ": NOOP");
+            emit(end + " NOOP");     // ✅ FIXED
             break;
         }
+
         case NodeType::LOOP: {
             std::string top = newLabel("WHILE");
             std::string end = newLabel("ENDWHILE");
-            emit(top + ": NOOP");
+            emit(top + " NOOP");     // ✅ FIXED
             genRelFalse(n->child2, end);
             genStat(n->child4);
             emit("BR " + top);
-            emit(end + ": NOOP");
+            emit(end + " NOOP");     // ✅ FIXED
             break;
         }
+
         case NodeType::BLOCK:
             genStats(n->child2);
             break;
+
         default:
             genStat(n->child1);
     }
@@ -250,3 +254,4 @@ void generateTarget(Node* root, std::ostream& out) {
 
     out << "STOP\n";
 }
+

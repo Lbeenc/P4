@@ -14,9 +14,7 @@ static std::vector<std::string> code;
 
 /* ---------- helpers ---------- */
 
-static void emit(const std::string& s) {
-    code.push_back(s);
-}
+static void emit(const std::string& s) { code.push_back(s); }
 
 static std::string newTemp() {
     std::string t = "_t" + std::to_string(tempCount++);
@@ -28,13 +26,8 @@ static std::string newLabel(const std::string& base) {
     return base + std::to_string(labelCount++);
 }
 
-static bool isId(const Token& t) {
-    return t.id == TokenID::IDENT_tk;
-}
-
-static bool isNum(const Token& t) {
-    return t.id == TokenID::NUM_tk;
-}
+static bool isId(const Token& t)  { return t.id == TokenID::IDENT_tk; }
+static bool isNum(const Token& t) { return t.id == TokenID::NUM_tk; }
 
 /* ---------- variable collection ---------- */
 
@@ -73,11 +66,35 @@ static std::string genR(Node* n) {
 
     // ( exp )
     if (n->child1) return genExpr(n->child1);
+
     return "";
 }
 
+// Helper: emit code for (a % b) into a fresh temp using DIV/MULT/SUB (no MOD instruction!)
+static std::string genModulo(const std::string& a, const std::string& b) {
+    // q = a / b
+    std::string q = newTemp();
+    emit("LOAD " + a);
+    emit("DIV " + b);
+    emit("STORE " + q);
+
+    // prod = q * b
+    std::string prod = newTemp();
+    emit("LOAD " + q);
+    emit("MULT " + b);
+    emit("STORE " + prod);
+
+    // r = a - prod
+    std::string r = newTemp();
+    emit("LOAD " + a);
+    emit("SUB " + prod);
+    emit("STORE " + r);
+
+    return r;
+}
+
 // N -> - N | R % N | R
-// In your parser, '%' is stored in tk2 and RHS in child2, with the base R in child1.
+// In your parser: base R in child1, '%' in tk2, RHS N in child2
 static std::string genN(Node* n) {
     if (!n) return "";
 
@@ -91,24 +108,19 @@ static std::string genN(Node* n) {
         return t;
     }
 
-    // base R is in child1
     std::string left = genR(n->child1);
 
     // percent
     if (n->tk2.instance == "%" && n->child2) {
         std::string right = genN(n->child2);
-        std::string t = newTemp();
-        emit("LOAD " + left);
-        emit("MOD " + right);
-        emit("STORE " + t);
-        return t;
+        return genModulo(left, right);   // ✅ uses DIV/MULT/SUB
     }
 
     return left;
 }
 
 // M -> N * M | N
-// In your parser, '*' is stored in tk1, left N in child1, right M in child2.
+// In your parser: '*' in tk1, left N in child1, right M in child2
 static std::string genM(Node* n) {
     if (!n) return "";
 
@@ -127,7 +139,7 @@ static std::string genM(Node* n) {
 }
 
 // EXP -> M + EXP | M - EXP | M
-// In your parser, +|- in tk1, left M in child1, right EXP in child2.
+// In your parser: +|- in tk1, left M in child1, right EXP in child2
 static std::string genExpr(Node* n) {
     if (!n) return "";
 
@@ -154,31 +166,23 @@ static void genRelFalseFromParent(const std::string& op,
                                   const std::string& lab) {
     std::string right = genExpr(rightExp);
 
-    // ACC = left - right
     emit("LOAD " + leftVar);
     emit("SUB " + right);
 
-    // Branch when condition is FALSE
     if (op == ">") {
-        // false if <= 0
         emit("BRNEG " + lab);
         emit("BRZERO " + lab);
     } else if (op == "<") {
-        // false if >= 0
         emit("BRPOS " + lab);
         emit("BRZERO " + lab);
     } else if (op == ">=") {
-        // false if < 0
         emit("BRNEG " + lab);
     } else if (op == "<=") {
-        // false if > 0
         emit("BRPOS " + lab);
     } else if (op == "eq") {
-        // false if != 0
         emit("BRNEG " + lab);
         emit("BRPOS " + lab);
     } else if (op == "neq") {
-        // false if == 0
         emit("BRZERO " + lab);
     } else {
         throw std::runtime_error("Unknown relational operator: " + op);
@@ -196,14 +200,12 @@ static void genStats(Node* n) {
 }
 
 static std::string getAssignTarget(Node* n) {
-    // In many of your nodes, tk2 is the IDENT after "set"
     if (isId(n->tk2)) return n->tk2.instance;
     if (n->child1 && isId(n->child1->tk1)) return n->child1->tk1.instance;
     throw std::runtime_error("ASSIGN missing target");
 }
 
 static std::string getReadTarget(Node* n) {
-    // In your READ node, tk2 is the IDENT after "read"
     if (isId(n->tk2)) return n->tk2.instance;
     if (n->child1 && isId(n->child1->tk1)) return n->child1->tk1.instance;
     throw std::runtime_error("READ missing identifier");
@@ -225,46 +227,32 @@ static void genStat(Node* n) {
 
         case NodeType::ASSIGN: {
             std::string id = getAssignTarget(n);
-
-            // In your ASSIGN node, the RHS expression is typically child2.
-            // Fallback to child1 if needed.
             Node* rhs = (n->child2 ? n->child2 : n->child1);
             std::string v = genExpr(rhs);
-
             emit("LOAD " + v);
             emit("STORE " + id);
             break;
         }
 
         case NodeType::COND: {
-            // Parser layout (from your parser.cpp):
-            // COND:
-            //   tk2 = left IDENT
-            //   child1 = REL (op in tk1)
-            //   child2 = EXP (right)
-            //   child3 = STAT (body)
+            // COND: tk2=left IDENT, child1=REL(op), child2=EXP(right), child3=STAT(body)
             std::string end = newLabel("ENDIF");
-
             std::string left = n->tk2.instance;
             std::string op = (n->child1 ? n->child1->tk1.instance : "");
 
             genRelFalseFromParent(op, left, n->child2, end);
             genStat(n->child3);
 
-            emit(end + " NOOP");
+            emit(end + ": NOOP");   // ✅ label syntax
             break;
         }
 
         case NodeType::LOOP: {
-            // LOOP:
-            //   tk2 = left IDENT
-            //   child1 = REL (op)
-            //   child2 = EXP (right)
-            //   child3 = STAT (body)
+            // LOOP: tk2=left IDENT, child1=REL(op), child2=EXP(right), child3=STAT(body)
             std::string top = newLabel("WHILE");
             std::string end = newLabel("ENDWHILE");
 
-            emit(top + " NOOP");
+            emit(top + ": NOOP");   // ✅ label syntax
 
             std::string left = n->tk2.instance;
             std::string op = (n->child1 ? n->child1->tk1.instance : "");
@@ -273,12 +261,11 @@ static void genStat(Node* n) {
             genStat(n->child3);
 
             emit("BR " + top);
-            emit(end + " NOOP");
+            emit(end + ": NOOP");   // ✅ label syntax
             break;
         }
 
         case NodeType::BLOCK: {
-            // BLOCK: child2 = stats
             genStats(n->child2);
             break;
         }
@@ -299,17 +286,15 @@ void generateTarget(Node* root, std::ostream& out) {
 
     collectVars(root);
 
-    // program -> vars block (your root->child2 is block)
     if (root && root->child2)
         genStat(root->child2);
 
-    // STORAGE FIRST
+    // storage
     for (const auto& v : vars) out << v << " 0\n";
     for (const auto& t : temps) out << t << " 0\n";
 
-    // CODE
+    // code
     for (const auto& c : code) out << c << "\n";
 
     out << "STOP\n";
 }
-
